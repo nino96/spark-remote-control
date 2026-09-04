@@ -1,0 +1,367 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+readonly SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+readonly REPO_DIR="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)"
+readonly CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/spark-remote-control"
+readonly CONFIG_FILE="$CONFIG_DIR/env"
+readonly PROJECT_CONFIG_DIR="$CONFIG_DIR/projects"
+readonly USER_BIN_DIR="$HOME/.local/bin"
+readonly USER_UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+readonly VERSIONS_FILE="$REPO_DIR/config/versions.env"
+
+say() { printf '%s\n' "$*"; }
+warn() { printf 'warning: %s\n' "$*" >&2; }
+die() { printf 'error: %s\n' "$*" >&2; exit 1; }
+have() { command -v "$1" >/dev/null 2>&1; }
+
+usage() {
+  cat <<'EOF'
+sparkctl - manage the GX10 remote coding workstation
+
+Usage:
+  sparkctl setup
+  sparkctl doctor
+  sparkctl update
+  sparkctl uninstall [--purge]
+  sparkctl tool <install|update> opencode
+  sparkctl auth opencode
+  sparkctl service <enable|disable|start|stop|restart|status|logs> [opencode]
+  sparkctl project add <name> <directory>
+  sparkctl project <enable|disable|start|stop|restart|status|logs|remove> <name>
+  sparkctl project list
+  sparkctl tailscale <status|plan>
+  sparkctl bwrap <status|install|remove|test>
+
+Typical first run:
+  sparkctl setup
+  sparkctl tool install opencode
+  sparkctl auth opencode
+  sparkctl doctor
+  sparkctl bwrap install
+  sparkctl service enable opencode
+EOF
+}
+
+load_config() {
+  if [[ -f "$CONFIG_FILE" ]]; then
+    set -a
+    # shellcheck disable=SC1090
+    source "$CONFIG_FILE"
+    set +a
+  fi
+  export PATH="${SPARK_PATH:-$HOME/.local/bin:$HOME/.opencode/bin:/usr/local/bin:/usr/bin:/bin}"
+}
+
+load_versions() {
+  [[ -f "$VERSIONS_FILE" ]] || die "version manifest missing: $VERSIONS_FILE"
+  # shellcheck disable=SC1090
+  source "$VERSIONS_FILE"
+}
+
+safe_link() {
+  local source_path=$1 target_path=$2
+  if [[ -L "$target_path" ]]; then
+    [[ "$(readlink "$target_path")" == "$source_path" ]] || die "refusing to replace unrelated symlink: $target_path"
+    return
+  fi
+  [[ ! -e "$target_path" ]] || die "refusing to replace existing file: $target_path"
+  ln -s "$source_path" "$target_path"
+}
+
+setup() {
+  install -d -m 0700 "$CONFIG_DIR" "$PROJECT_CONFIG_DIR"
+  install -d -m 0755 "$USER_BIN_DIR" "$USER_UNIT_DIR"
+
+  if [[ ! -f "$CONFIG_FILE" ]]; then
+    install -m 0600 "$REPO_DIR/config/spark.env.example" "$CONFIG_FILE"
+    say "Created $CONFIG_FILE"
+  else
+    say "Kept existing $CONFIG_FILE"
+  fi
+
+  safe_link "$REPO_DIR/bin/sparkctl" "$USER_BIN_DIR/sparkctl"
+  local unit
+  for unit in "$REPO_DIR"/systemd/user/*.service; do
+    safe_link "$unit" "$USER_UNIT_DIR/$(basename "$unit")"
+  done
+  systemctl --user daemon-reload
+  say "Installed user-service links. Run: sparkctl doctor"
+}
+
+check_command() {
+  local command_name=$1 requirement=${2:-optional}
+  if have "$command_name"; then
+    printf '  %-16s %s\n' "$command_name" "$(command -v "$command_name")"
+  else
+    printf '  %-16s %s\n' "$command_name" "missing ($requirement)"
+  fi
+}
+
+doctor() {
+  load_config
+  say "Host"
+  printf '  %-16s %s\n' kernel "$(uname -srmo)"
+  if [[ -r /etc/os-release ]]; then
+    # shellcheck disable=SC1091
+    source /etc/os-release
+    printf '  %-16s %s\n' os "${PRETTY_NAME:-unknown}"
+  fi
+
+  say "Commands"
+  check_command git required
+  check_command systemctl required
+  check_command bwrap "required for Codex sandbox"
+  check_command tailscale "recommended for remote web access"
+  check_command opencode "required for OpenCode service"
+  check_command claude "optional remote-control service"
+  check_command codex optional
+  check_command docker "existing vLLM runtime"
+
+  say "Configuration"
+  [[ -f "$CONFIG_FILE" ]] && say "  config           $CONFIG_FILE" || say "  config           missing; run sparkctl setup"
+  [[ -n "${OPENCODE_SERVER_PASSWORD:-}" ]] && say "  opencode-auth    password configured" || say "  opencode-auth    password missing"
+  [[ -d "${SPARK_PROJECTS_DIR:-$HOME/code}" ]] && say "  projects-root    ${SPARK_PROJECTS_DIR:-$HOME/code}" || say "  projects-root    missing: ${SPARK_PROJECTS_DIR:-$HOME/code}"
+  if systemctl --user show-environment >/dev/null 2>&1; then
+    say "  systemd-user     available"
+  else
+    say "  systemd-user     unavailable"
+  fi
+
+  say "Bubblewrap"
+  "$REPO_DIR/scripts/bwrap-apparmor.sh" status || true
+
+  say "Tailscale"
+  if have tailscale; then
+    tailscale serve status || true
+  else
+    say "  unavailable"
+  fi
+
+  say "Existing vLLM"
+  if have docker && docker inspect vllm-server >/dev/null 2>&1; then
+    docker inspect --format '  container={{.State.Status}} restart={{.HostConfig.RestartPolicy.Name}} ports={{json .HostConfig.PortBindings}}' vllm-server
+    if have curl && curl -fsS --max-time 3 "${SPARK_VLLM_URL:-http://127.0.0.1:8000/v1}/models" >/dev/null; then
+      say "  endpoint         healthy"
+    else
+      say "  endpoint         unavailable"
+    fi
+  else
+    say "  container        not found"
+  fi
+
+  say "Managed services"
+  systemctl --user --no-pager --full status spark-opencode.service || true
+}
+
+tool_action() {
+  local action=${1:-} name=${2:-}
+  [[ "$action" == install || "$action" == update ]] || die "tool action must be install or update"
+  [[ "$name" == opencode ]] || die "only the opencode tool is currently managed"
+  load_versions
+  have npm || die "npm is required to install OpenCode"
+  local spec="${SPARK_OPENCODE_NPM_PACKAGE}@${SPARK_OPENCODE_VERSION}"
+  say "Installing $spec into $HOME/.local"
+  npm install --global --prefix "$HOME/.local" "$spec"
+  "$HOME/.local/bin/opencode" --version
+}
+
+auth_action() {
+  [[ "${1:-}" == opencode ]] || die "usage: sparkctl auth opencode"
+  load_config
+  have opencode || die "install OpenCode first: sparkctl tool install opencode"
+  exec opencode auth login
+}
+
+service_action() {
+  local action=${1:-status} name=${2:-opencode}
+  [[ "$name" == opencode ]] || die "unknown managed service: $name"
+  local unit=spark-opencode.service
+  case "$action" in
+    enable) systemctl --user enable --now "$unit" ;;
+    disable) systemctl --user disable --now "$unit" ;;
+    start|stop|restart) systemctl --user "$action" "$unit" ;;
+    status) systemctl --user --no-pager --full status "$unit" ;;
+    logs) exec journalctl --user -u "$unit" -f ;;
+    *) die "unknown service action: $action" ;;
+  esac
+}
+
+validate_project_name() {
+  [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || die "project name must contain only letters, numbers, dot, underscore, and dash"
+}
+
+project_add() {
+  local name=${1:-} project_dir=${2:-}
+  [[ -n "$name" && -n "$project_dir" ]] || die "usage: sparkctl project add <name> <directory>"
+  validate_project_name "$name"
+  project_dir=$(realpath "$project_dir")
+  [[ -d "$project_dir" ]] || die "project directory does not exist: $project_dir"
+  install -d -m 0700 "$PROJECT_CONFIG_DIR"
+  local target="$PROJECT_CONFIG_DIR/$name.env"
+  [[ ! -e "$target" ]] || die "project already exists: $name"
+  {
+    printf 'CLAUDE_PROJECT_DIR=%q\n' "$project_dir"
+    printf 'CLAUDE_PERMISSION_MODE=%q\n' auto
+  } >"$target"
+  chmod 0600 "$target"
+  say "Added $name -> $project_dir"
+  say "Enable it with: sparkctl project enable $name"
+}
+
+project_action() {
+  local action=${1:-list} name=${2:-}
+  if [[ "$action" == add ]]; then
+    project_add "${2:-}" "${3:-}"
+    return
+  fi
+  if [[ "$action" == list ]]; then
+    if [[ -d "$PROJECT_CONFIG_DIR" ]]; then
+      local file
+      for file in "$PROJECT_CONFIG_DIR"/*.env; do
+        [[ -e "$file" ]] || continue
+        printf '%s\n' "$(basename "$file" .env)"
+      done
+    fi
+    return
+  fi
+  [[ -n "$name" ]] || die "project name required"
+  validate_project_name "$name"
+  local project_file="$PROJECT_CONFIG_DIR/$name.env"
+  [[ -f "$project_file" ]] || die "unknown project: $name"
+  local unit="spark-claude-remote@$name.service"
+  case "$action" in
+    enable) systemctl --user enable --now "$unit" ;;
+    disable) systemctl --user disable --now "$unit" ;;
+    start|stop|restart) systemctl --user "$action" "$unit" ;;
+    status) systemctl --user --no-pager --full status "$unit" ;;
+    logs) exec journalctl --user -u "$unit" -f ;;
+    remove)
+      systemctl --user disable --now "$unit" >/dev/null 2>&1 || true
+      mv "$project_file" "$project_file.disabled-$(date +%Y%m%d%H%M%S)"
+      say "Disabled and archived project configuration: $name"
+      ;;
+    *) die "unknown project action: $action" ;;
+  esac
+}
+
+tailscale_action() {
+  case "${1:-status}" in
+    status)
+      have tailscale || die "tailscale is not installed"
+      tailscale serve status
+      ;;
+    plan)
+      cat <<'EOF'
+The GX10 already serves HTTPS / on the default tailnet port. A non-destructive
+starting point for OpenCode is a separate tailnet HTTPS port:
+
+  sudo tailscale serve --bg --https=4443 http://127.0.0.1:4096
+
+Review `tailscale serve status` before and after. Do not run `tailscale serve
+reset`; it would remove the existing Stremio route.
+EOF
+      ;;
+    *) die "usage: sparkctl tailscale <status|plan>" ;;
+  esac
+}
+
+run_opencode() {
+  load_config
+  have opencode || die "opencode is not installed or not on SPARK_PATH"
+  [[ -n "${OPENCODE_SERVER_PASSWORD:-}" ]] || die "set OPENCODE_SERVER_PASSWORD in $CONFIG_FILE"
+  local host=${SPARK_OPENCODE_HOST:-127.0.0.1}
+  local port=${SPARK_OPENCODE_PORT:-4096}
+  local projects_dir=${SPARK_PROJECTS_DIR:-$HOME/code}
+  [[ "$host" == 127.0.0.1 || "$host" == ::1 || "$host" == localhost ]] || die "OpenCode must bind to loopback, not $host"
+  [[ -d "$projects_dir" ]] || die "projects directory does not exist: $projects_dir"
+  cd "$projects_dir"
+  exec opencode web --hostname "$host" --port "$port"
+}
+
+run_claude() {
+  local name=${1:-}
+  validate_project_name "$name"
+  load_config
+  local project_file="$PROJECT_CONFIG_DIR/$name.env"
+  [[ -f "$project_file" ]] || die "project configuration missing: $project_file"
+  set -a
+  # shellcheck disable=SC1090
+  source "$project_file"
+  set +a
+  have claude || die "claude is not installed or not on SPARK_PATH"
+  [[ -d "${CLAUDE_PROJECT_DIR:-}" ]] || die "CLAUDE_PROJECT_DIR is invalid"
+  cd "$CLAUDE_PROJECT_DIR"
+  exec claude remote-control --permission-mode "${CLAUDE_PERMISSION_MODE:-auto}"
+}
+
+update_repo() {
+  have git || die "git is required"
+  [[ -z "$(git -C "$REPO_DIR" status --porcelain)" ]] || die "repository has uncommitted changes; commit or stash them before updating"
+  git -C "$REPO_DIR" pull --ff-only
+  setup
+  "$REPO_DIR/scripts/check.sh"
+}
+
+remove_managed_link() {
+  local target=$1 source=$2
+  if [[ -L "$target" && "$(readlink "$target")" == "$source" ]]; then
+    rm "$target"
+  fi
+}
+
+uninstall_repo() {
+  local purge=${1:-}
+  systemctl --user disable --now spark-opencode.service >/dev/null 2>&1 || true
+  local project_file name
+  if [[ -d "$PROJECT_CONFIG_DIR" ]]; then
+    for project_file in "$PROJECT_CONFIG_DIR"/*.env; do
+      [[ -e "$project_file" ]] || continue
+      name=$(basename "$project_file" .env)
+      systemctl --user disable --now "spark-claude-remote@$name.service" >/dev/null 2>&1 || true
+    done
+  fi
+  remove_managed_link "$USER_BIN_DIR/sparkctl" "$REPO_DIR/bin/sparkctl"
+  local unit
+  for unit in "$REPO_DIR"/systemd/user/*.service; do
+    remove_managed_link "$USER_UNIT_DIR/$(basename "$unit")" "$unit"
+  done
+  systemctl --user daemon-reload
+  if [[ "$purge" == --purge ]]; then
+    local archive="$CONFIG_DIR.disabled-$(date +%Y%m%d%H%M%S)"
+    [[ ! -e "$CONFIG_DIR" ]] || mv "$CONFIG_DIR" "$archive"
+    say "Configuration archived at $archive"
+  else
+    say "Configuration preserved at $CONFIG_DIR"
+  fi
+  say "Removed managed service and command links. The repository was preserved."
+}
+
+main() {
+  local command=${1:-help}
+  shift || true
+  case "$command" in
+    help|-h|--help) usage ;;
+    setup|install) setup ;;
+    doctor) doctor ;;
+    update) update_repo ;;
+    uninstall) uninstall_repo "$@" ;;
+    tool) tool_action "$@" ;;
+    auth) auth_action "$@" ;;
+    service) service_action "$@" ;;
+    project) project_action "$@" ;;
+    tailscale) tailscale_action "$@" ;;
+    bwrap) exec "$REPO_DIR/scripts/bwrap-apparmor.sh" "$@" ;;
+    internal)
+      case "${1:-}" in
+        run-opencode) run_opencode ;;
+        run-claude) run_claude "${2:-}" ;;
+        *) die "unknown internal command: ${1:-}" ;;
+      esac
+      ;;
+    *) die "unknown command: $command (run 'sparkctl help')" ;;
+  esac
+}
+
+main "$@"
+
