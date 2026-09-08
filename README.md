@@ -121,14 +121,67 @@ should access:
 
 ```bash
 sparkctl project add my-project ~/code/my-project
-sparkctl project enable my-project
-sparkctl project logs my-project
 ```
 
 The service uses Claude's `auto` permission mode locally when the selected
 account/model supports it. Remote Control uses outbound HTTPS and opens no
 inbound listener. Treat `bypassPermissions` as suitable only for a disposable
 container or VM.
+
+### Always-available multi-session server
+
+Enable the systemd service when you want the project to accept on-demand
+sessions without an attached terminal:
+
+```bash
+sparkctl project enable my-project
+sparkctl project logs my-project
+```
+
+`claude remote-control` is a foreground server process, not a self-daemonizing
+one, so `spark-claude-remote@NAME.service` is what actually keeps it running:
+`Restart=always` brings it back after a crash, a Ctrl+C-equivalent exit, or the
+~10-minute give-up Claude Code performs on an extended network outage.
+This restores server availability, but it does not transparently reattach every
+session the previous process served. A restart can create a new session;
+existing conversations must be resumed explicitly when continuity matters.
+
+By default one project serves every on-demand session from the same checkout,
+which can conflict if two sessions edit the same files. Pass `--spawn
+worktree` when adding a project to give each on-demand session its own git
+worktree instead, and `--capacity N` to cap how many concurrent sessions the
+server accepts (Claude Code's own default is 32):
+
+```bash
+sparkctl project add my-project ~/code/my-project --spawn worktree --capacity 4
+```
+
+`--spawn worktree` requires the project directory to be a git repository.
+The managed service intentionally supports only the persistent `same-dir` and
+`worktree` modes. Use the tmux workflow below for one interactive session.
+Do not run both workflows for the same project at once; `sparkctl` refuses to
+start either one while the other is active.
+
+### One resumable session with tmux
+
+For a session you want to supervise and resume deliberately, create or attach
+to its project-scoped tmux session:
+
+```bash
+sparkctl project tmux my-project
+```
+
+On first use this creates `spark-claude-my-project` and starts interactive
+`claude --remote-control`. Detach with `Ctrl-b d`; run the same `sparkctl`
+command later to attach again. If Claude exits after an extended outage, the
+tmux shell remains open. Resume the latest conversation with `claude
+--continue`, or select one with `claude --resume`, then run `/remote-control`
+inside Claude to expose it again.
+
+tmux does not survive a host reboot, but Claude's saved conversations do. After
+a reboot, create the tmux session again and use `claude --resume` if you need a
+specific previous conversation. To end the tmux session itself, exit its shell
+or run `tmux kill-session -t spark-claude-my-project`.
 
 ## Operations
 
@@ -162,4 +215,3 @@ dedicated agent account without access to the rootful Docker socket.
 
 See [product validation](docs/product-validation.md), [architecture](docs/architecture.md), and the
 [implementation plan](docs/implementation-plan.md).
-

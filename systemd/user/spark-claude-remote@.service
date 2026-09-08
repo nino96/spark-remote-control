@@ -3,11 +3,18 @@ Description=Spark Remote Control - Claude project %i
 Documentation=https://code.claude.com/docs/en/remote-control
 Wants=network-online.target
 After=network-online.target
+StartLimitIntervalSec=600
+StartLimitBurst=8
 
 [Service]
 Type=simple
 ExecStart=/usr/bin/env %h/.local/bin/sparkctl internal run-claude %i
-Restart=on-failure
+# `claude remote-control` exits on purpose after ~10 minutes offline (see
+# docs/product-validation.md), so Restart=on-failure would leave the daemon
+# dead after any outage longer than that. Restart=always brings it back;
+# this restores server availability but does not guarantee that sessions
+# served by the previous process are reattached.
+Restart=always
 RestartSec=10s
 TimeoutStopSec=30s
 UMask=0077
@@ -22,4 +29,3 @@ RestrictSUIDSGID=true
 
 [Install]
 WantedBy=default.target
-

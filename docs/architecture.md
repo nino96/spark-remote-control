@@ -43,7 +43,8 @@ local environment remotely; it is not equivalent to an independent cloud job.
 | Unit | Default | Exposure | Purpose |
 | --- | --- | --- | --- |
 | `spark-opencode.service` | disabled | loopback | Persistent OpenCode Web UI |
-| `spark-claude-remote@NAME.service` | disabled | outbound relay | Claude access to one project |
+| `spark-claude-remote@NAME.service` | disabled | outbound relay | Always-available, multi-session Claude access to one project |
+| `sparkctl project tmux NAME` | on demand | outbound relay | One interactive Claude session with explicit resume control |
 | Existing `vllm-server` container | external | currently all interfaces | Local model API; monitor now, migrate later |
 
 Codex and Copilot remain interactive CLIs. Cloud variants are launched from
@@ -63,6 +64,19 @@ their provider/GitHub interfaces and are intentionally not coupled to systemd.
 - Systemd units are linked to this checkout, making updates immediate and
   rollback equivalent to checking out an earlier known-good Git revision and
   running `sparkctl setup`.
+- `claude remote-control` stays in the foreground and exits on its own after
+  roughly 10 minutes offline; `spark-claude-remote@NAME.service` uses
+  `Restart=always` (not `on-failure`) so a clean exit from that give-up also
+  gets restarted, with a `StartLimitBurst` so a persistently broken project
+  (bad credentials, missing directory) stops retrying instead of looping
+  forever. A restart restores server availability but does not guarantee that
+  sessions served by the previous process are reattached.
+- `sparkctl project add` can set `--spawn worktree` so on-demand sessions get
+  isolated git worktrees instead of sharing one checkout, and `--capacity` to
+  bound concurrent sessions per project.
+- `sparkctl project tmux` launches interactive Remote Control inside a
+  project-scoped tmux session. It leaves conversation selection and resume
+  explicit, and keeps a shell available if Claude exits.
 
 ## Secrets
 
@@ -70,4 +84,3 @@ Store service environment values in
 `~/.config/spark-remote-control/env` (mode `0600`). Provider CLIs retain their
 own credentials in vendor-managed stores. Never copy those stores into this
 repository, containers, logs, or cloud-agent prompts.
-
