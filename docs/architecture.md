@@ -63,6 +63,16 @@ their provider/GitHub interfaces and are intentionally not coupled to systemd.
 - Systemd units are linked to this checkout, making updates immediate and
   rollback equivalent to checking out an earlier known-good Git revision and
   running `sparkctl setup`.
+- `claude remote-control` stays in the foreground and exits on its own after
+  roughly 10 minutes offline; `spark-claude-remote@NAME.service` uses
+  `Restart=always` (not `on-failure`) so a clean exit from that give-up also
+  gets restarted, with a `StartLimitBurst` so a persistently broken project
+  (bad credentials, missing directory) stops retrying instead of looping
+  forever. Restarting in the same project directory resumes the sessions the
+  server was already serving rather than starting duplicates.
+- `sparkctl project add` can set `--spawn worktree` so on-demand sessions get
+  isolated git worktrees instead of sharing one checkout, and `--capacity` to
+  bound concurrent sessions per project.
 
 ## Secrets
 

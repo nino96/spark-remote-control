@@ -1,8 +1,9 @@
 # Product validation
 
-Verified against first-party documentation on 2026-09-04. Product
-entitlements, quotas, preview status, and CLI flags are volatile; re-check them
-before automating billing-sensitive behavior.
+Verified against first-party documentation on 2026-09-04, and the Claude Code
+section re-verified on 2026-09-08. Product entitlements, quotas, preview
+status, and CLI flags are volatile; re-check them before automating
+billing-sensitive behavior.
 
 ## Codex
 
@@ -23,11 +24,33 @@ and [sandboxing](https://learn.chatgpt.com/docs/sandboxing).
 ## Claude Code
 
 - Claude Code on the web is a true hosted path for supported subscriptions.
-- `claude remote-control` keeps execution and filesystem access on the GX10
-  and communicates outbound through Anthropic's relay; it is not a cloud VM.
+- `claude remote-control` (server mode) keeps execution and filesystem access
+  on the GX10 and communicates outbound through Anthropic's relay; it is not a
+  cloud VM. It is a plain foreground process, not a self-daemonizing one: the
+  docs' own workaround for surviving an SSH disconnect is to run it inside
+  `tmux`/`screen`. This repository uses a hardened systemd user service
+  instead, which covers both the SSH-disconnect case and process crashes.
+- Server mode gives up and exits after roughly 10 minutes with no network
+  reachability at all (distinct from ordinary reconnect handling, which
+  retries indefinitely). This is an intentional, "successful" exit, not a
+  crash, which is why the systemd unit uses `Restart=always` rather than
+  `Restart=on-failure` — the latter would not restart the daemon after that
+  kind of exit and it would stay down until someone noticed.
+- Re-running `claude remote-control` in the same project directory resumes
+  every session that server was already serving (no `--continue` or
+  `--session-id` needed) as long as it happens within roughly 4 hours of the
+  previous process stopping. A systemd restart therefore reattaches to
+  in-progress work instead of creating a duplicate/orphaned session.
+- Server mode supports `--spawn <same-dir|worktree|session>` (default
+  `same-dir`) and `--capacity <N>` (default 32, incompatible with
+  `--spawn session`). `worktree` gives each on-demand session its own git
+  worktree so concurrent sessions in one project don't edit the same files;
+  it requires the project directory to be a git repository. `sparkctl project
+  add` exposes both flags.
 - `acceptEdits` is not autonomous shell execution. `auto` remains the sensible
-  local default when supported; `bypassPermissions` belongs only inside an
-  intentionally isolated VM or container.
+  local default when supported (it is a documented, valid `--permission-mode`
+  value); `bypassPermissions` belongs only inside an intentionally isolated VM
+  or container.
 - Auto/Bypass are configured on the local host rather than selected from the
   Remote Control UI.
 

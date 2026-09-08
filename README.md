@@ -130,6 +130,28 @@ account/model supports it. Remote Control uses outbound HTTPS and opens no
 inbound listener. Treat `bypassPermissions` as suitable only for a disposable
 container or VM.
 
+`claude remote-control` is a foreground server process, not a self-daemonizing
+one, so `spark-claude-remote@NAME.service` is what actually keeps it running:
+`Restart=always` brings it back after a crash, a Ctrl+C-equivalent exit, or the
+~10-minute give-up Claude Code performs on an extended network outage.
+Restarting `claude remote-control` in the same project directory resumes the
+sessions it was already serving (within roughly a 4-hour window) instead of
+creating new ones, so the restart is invisible from the phone/web side.
+
+By default one project serves every on-demand session from the same checkout,
+which can conflict if two sessions edit the same files. Pass `--spawn
+worktree` when adding a project to give each on-demand session its own git
+worktree instead, and `--capacity N` to cap how many concurrent sessions the
+server accepts (Claude Code's own default is 32):
+
+```bash
+sparkctl project add my-project ~/code/my-project --spawn worktree --capacity 4
+```
+
+`--spawn worktree` requires the project directory to be a git repository.
+`--spawn session` limits the server to exactly one session and cannot be
+combined with `--capacity`.
+
 ## Operations
 
 ```bash

@@ -27,7 +27,7 @@ Usage:
   sparkctl tool <install|update> opencode
   sparkctl auth opencode
   sparkctl service <enable|disable|start|stop|restart|status|logs> [opencode]
-  sparkctl project add <name> <directory>
+  sparkctl project add <name> <directory> [--spawn same-dir|worktree|session] [--capacity N]
   sparkctl project <enable|disable|start|stop|restart|status|logs|remove> <name>
   sparkctl project list
   sparkctl tailscale <status|plan>
@@ -192,27 +192,58 @@ validate_project_name() {
 }
 
 project_add() {
-  local name=${1:-} project_dir=${2:-}
-  [[ -n "$name" && -n "$project_dir" ]] || die "usage: sparkctl project add <name> <directory>"
+  [[ $# -ge 2 ]] || die "usage: sparkctl project add <name> <directory> [--spawn same-dir|worktree|session] [--capacity N]"
+  local name=$1 project_dir=$2
+  shift 2
+  local spawn_mode=same-dir capacity=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --spawn)
+        [[ $# -ge 2 ]] || die "--spawn requires a value"
+        spawn_mode=$2
+        shift 2
+        ;;
+      --capacity)
+        [[ $# -ge 2 ]] || die "--capacity requires a value"
+        capacity=$2
+        shift 2
+        ;;
+      *) die "unknown project add option: $1" ;;
+    esac
+  done
   validate_project_name "$name"
+  case "$spawn_mode" in
+    same-dir|worktree|session) ;;
+    *) die "--spawn must be same-dir, worktree, or session" ;;
+  esac
+  if [[ -n "$capacity" ]]; then
+    [[ "$capacity" =~ ^[1-9][0-9]*$ ]] || die "--capacity must be a positive integer"
+    [[ "$spawn_mode" != session ]] || die "--capacity cannot be combined with --spawn session"
+  fi
   project_dir=$(realpath "$project_dir")
   [[ -d "$project_dir" ]] || die "project directory does not exist: $project_dir"
+  if [[ "$spawn_mode" == worktree ]]; then
+    git -C "$project_dir" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+      || die "--spawn worktree requires $project_dir to be a git repository"
+  fi
   install -d -m 0700 "$PROJECT_CONFIG_DIR"
   local target="$PROJECT_CONFIG_DIR/$name.env"
   [[ ! -e "$target" ]] || die "project already exists: $name"
   {
     printf 'CLAUDE_PROJECT_DIR=%q\n' "$project_dir"
     printf 'CLAUDE_PERMISSION_MODE=%q\n' auto
+    printf 'CLAUDE_SPAWN_MODE=%q\n' "$spawn_mode"
+    [[ -z "$capacity" ]] || printf 'CLAUDE_CAPACITY=%q\n' "$capacity"
   } >"$target"
   chmod 0600 "$target"
-  say "Added $name -> $project_dir"
+  say "Added $name -> $project_dir (spawn=$spawn_mode${capacity:+, capacity=$capacity})"
   say "Enable it with: sparkctl project enable $name"
 }
 
 project_action() {
   local action=${1:-list} name=${2:-}
   if [[ "$action" == add ]]; then
-    project_add "${2:-}" "${3:-}"
+    project_add "${@:2}"
     return
   fi
   if [[ "$action" == list ]]; then
@@ -292,7 +323,17 @@ run_claude() {
   have claude || die "claude is not installed or not on SPARK_PATH"
   [[ -d "${CLAUDE_PROJECT_DIR:-}" ]] || die "CLAUDE_PROJECT_DIR is invalid"
   cd "$CLAUDE_PROJECT_DIR"
-  exec claude remote-control --permission-mode "${CLAUDE_PERMISSION_MODE:-auto}"
+  local -a args=(remote-control --permission-mode "${CLAUDE_PERMISSION_MODE:-auto}")
+  # Only pass --spawn/--capacity when the project asked for something other
+  # than the CLI's own defaults, so projects configured before these settings
+  # existed keep behaving exactly as before.
+  if [[ -n "${CLAUDE_SPAWN_MODE:-}" && "${CLAUDE_SPAWN_MODE}" != same-dir ]]; then
+    args+=(--spawn "$CLAUDE_SPAWN_MODE")
+  fi
+  if [[ -n "${CLAUDE_CAPACITY:-}" ]]; then
+    args+=(--capacity "$CLAUDE_CAPACITY")
+  fi
+  exec claude "${args[@]}"
 }
 
 update_repo() {
