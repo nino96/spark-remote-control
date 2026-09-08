@@ -26,27 +26,26 @@ and [sandboxing](https://learn.chatgpt.com/docs/sandboxing).
 - Claude Code on the web is a true hosted path for supported subscriptions.
 - `claude remote-control` (server mode) keeps execution and filesystem access
   on the GX10 and communicates outbound through Anthropic's relay; it is not a
-  cloud VM. It is a plain foreground process, not a self-daemonizing one: the
-  docs' own workaround for surviving an SSH disconnect is to run it inside
-  `tmux`/`screen`. This repository uses a hardened systemd user service
-  instead, which covers both the SSH-disconnect case and process crashes.
+  cloud VM. It is a plain foreground process, not a self-daemonizing one. This
+  repository offers a hardened systemd user service for multi-session
+  availability and a tmux helper for one supervised interactive session.
 - Server mode gives up and exits after roughly 10 minutes with no network
   reachability at all (distinct from ordinary reconnect handling, which
-  retries indefinitely). This is an intentional, "successful" exit, not a
-  crash, which is why the systemd unit uses `Restart=always` rather than
-  `Restart=on-failure` — the latter would not restart the daemon after that
-  kind of exit and it would stay down until someone noticed.
-- Re-running `claude remote-control` in the same project directory resumes
-  every session that server was already serving (no `--continue` or
-  `--session-id` needed) as long as it happens within roughly 4 hours of the
-  previous process stopping. A systemd restart therefore reattaches to
-  in-progress work instead of creating a duplicate/orphaned session.
+  retries indefinitely). Because that timeout can be a clean exit, the systemd
+  unit uses `Restart=always` rather than `Restart=on-failure`. The restart
+  restores server availability but can create a new session; it does not
+  guarantee recovery of every session the previous server managed.
+- Session continuity is explicit. The current CLI supports `--continue` for
+  the most recently recorded conversation in a directory and `--resume` for
+  selecting a conversation. `sparkctl project tmux` keeps the interactive
+  terminal available and does not guess which conversation to resume.
 - Server mode supports `--spawn <same-dir|worktree|session>` (default
   `same-dir`) and `--capacity <N>` (default 32, incompatible with
   `--spawn session`). `worktree` gives each on-demand session its own git
   worktree so concurrent sessions in one project don't edit the same files;
-  it requires the project directory to be a git repository. `sparkctl project
-  add` exposes both flags.
+  it requires the project directory to be a git repository. The persistent
+  service exposes `same-dir`, `worktree`, and capacity; its project interface
+  intentionally leaves one-session operation to the tmux workflow.
 - `acceptEdits` is not autonomous shell execution. `auto` remains the sensible
   local default when supported (it is a documented, valid `--permission-mode`
   value); `bypassPermissions` belongs only inside an intentionally isolated VM
@@ -87,4 +86,3 @@ and [individual usage billing](https://docs.github.com/en/copilot/concepts/billi
 Sources: [OpenCode CLI](https://opencode.ai/docs/cli/),
 [providers](https://opencode.ai/docs/providers/), and
 [permissions](https://opencode.ai/docs/permissions/).
-

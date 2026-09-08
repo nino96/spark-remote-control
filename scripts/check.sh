@@ -35,5 +35,6 @@ else
   printf 'AppArmor profile: SKIP (apparmor_parser not installed)\n'
 fi
 
-exit "$failed"
+"$REPO_DIR/scripts/test-sparkctl.sh"
 
+exit "$failed"

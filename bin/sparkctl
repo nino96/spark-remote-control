@@ -27,8 +27,9 @@ Usage:
   sparkctl tool <install|update> opencode
   sparkctl auth opencode
   sparkctl service <enable|disable|start|stop|restart|status|logs> [opencode]
-  sparkctl project add <name> <directory> [--spawn same-dir|worktree|session] [--capacity N]
+  sparkctl project add <name> <directory> [--spawn same-dir|worktree] [--capacity N]
   sparkctl project <enable|disable|start|stop|restart|status|logs|remove> <name>
+  sparkctl project tmux <name>
   sparkctl project list
   sparkctl tailscale <status|plan>
   sparkctl bwrap <status|install|remove|test>
@@ -115,6 +116,7 @@ doctor() {
   check_command tailscale "recommended for remote web access"
   check_command opencode "required for OpenCode service"
   check_command claude "optional remote-control service"
+  check_command tmux "required for project tmux"
   check_command codex optional
   check_command docker "existing vLLM runtime"
 
@@ -191,8 +193,19 @@ validate_project_name() {
   [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || die "project name must contain only letters, numbers, dot, underscore, and dash"
 }
 
+load_project_config() {
+  local name=$1
+  local project_file="$PROJECT_CONFIG_DIR/$name.env"
+  [[ -f "$project_file" ]] || die "project configuration missing: $project_file"
+  set -a
+  # shellcheck disable=SC1090
+  source "$project_file"
+  set +a
+  [[ -d "${CLAUDE_PROJECT_DIR:-}" ]] || die "CLAUDE_PROJECT_DIR is invalid"
+}
+
 project_add() {
-  [[ $# -ge 2 ]] || die "usage: sparkctl project add <name> <directory> [--spawn same-dir|worktree|session] [--capacity N]"
+  [[ $# -ge 2 ]] || die "usage: sparkctl project add <name> <directory> [--spawn same-dir|worktree] [--capacity N]"
   local name=$1 project_dir=$2
   shift 2
   local spawn_mode=same-dir capacity=""
@@ -213,12 +226,12 @@ project_add() {
   done
   validate_project_name "$name"
   case "$spawn_mode" in
-    same-dir|worktree|session) ;;
-    *) die "--spawn must be same-dir, worktree, or session" ;;
+    same-dir|worktree) ;;
+    session) die "--spawn session is not supported by the persistent service; use: sparkctl project tmux $name" ;;
+    *) die "--spawn must be same-dir or worktree" ;;
   esac
   if [[ -n "$capacity" ]]; then
     [[ "$capacity" =~ ^[1-9][0-9]*$ ]] || die "--capacity must be a positive integer"
-    [[ "$spawn_mode" != session ]] || die "--capacity cannot be combined with --spawn session"
   fi
   project_dir=$(realpath "$project_dir")
   [[ -d "$project_dir" ]] || die "project directory does not exist: $project_dir"
@@ -237,7 +250,45 @@ project_add() {
   } >"$target"
   chmod 0600 "$target"
   say "Added $name -> $project_dir (spawn=$spawn_mode${capacity:+, capacity=$capacity})"
-  say "Enable it with: sparkctl project enable $name"
+  say "Start its multi-session service with: sparkctl project enable $name"
+  say "Or open one interactive session with: sparkctl project tmux $name"
+}
+
+project_tmux() {
+  local name=$1
+  load_config
+  load_project_config "$name"
+  have tmux || die "tmux is required for project tmux"
+  have claude || die "claude is not installed or not on SPARK_PATH"
+
+  local unit="spark-claude-remote@$name.service"
+  if systemctl --user is-active --quiet "$unit"; then
+    die "$unit is active; stop it before using: sparkctl project tmux $name"
+  fi
+
+  local session_name="spark-claude-$name"
+  if tmux has-session -t "=$session_name" >/dev/null 2>&1; then
+    if [[ -n "${TMUX:-}" ]]; then
+      exec tmux switch-client -t "=$session_name"
+    fi
+    exec tmux attach-session -t "=$session_name"
+  fi
+
+  local runner_command
+  printf -v runner_command '%q ' "$REPO_DIR/bin/sparkctl" internal run-claude-tmux "$name"
+  runner_command=${runner_command% }
+  if [[ -n "${TMUX:-}" ]]; then
+    tmux new-session -d -s "$session_name" -c "$CLAUDE_PROJECT_DIR" "$runner_command"
+    exec tmux switch-client -t "=$session_name"
+  fi
+  exec tmux new-session -s "$session_name" -c "$CLAUDE_PROJECT_DIR" "$runner_command"
+}
+
+require_project_tmux_inactive() {
+  local name=$1 session_name="spark-claude-$1"
+  if have tmux && tmux has-session -t "=$session_name" >/dev/null 2>&1; then
+    die "$session_name is active; exit it before starting the persistent service for $name"
+  fi
 }
 
 project_action() {
@@ -262,9 +313,17 @@ project_action() {
   [[ -f "$project_file" ]] || die "unknown project: $name"
   local unit="spark-claude-remote@$name.service"
   case "$action" in
-    enable) systemctl --user enable --now "$unit" ;;
+    tmux) project_tmux "$name" ;;
+    enable)
+      require_project_tmux_inactive "$name"
+      systemctl --user enable --now "$unit"
+      ;;
     disable) systemctl --user disable --now "$unit" ;;
-    start|stop|restart) systemctl --user "$action" "$unit" ;;
+    start|restart)
+      require_project_tmux_inactive "$name"
+      systemctl --user "$action" "$unit"
+      ;;
+    stop) systemctl --user stop "$unit" ;;
     status) systemctl --user --no-pager --full status "$unit" ;;
     logs) exec journalctl --user -u "$unit" -f ;;
     remove)
@@ -314,26 +373,43 @@ run_claude() {
   local name=${1:-}
   validate_project_name "$name"
   load_config
-  local project_file="$PROJECT_CONFIG_DIR/$name.env"
-  [[ -f "$project_file" ]] || die "project configuration missing: $project_file"
-  set -a
-  # shellcheck disable=SC1090
-  source "$project_file"
-  set +a
+  load_project_config "$name"
   have claude || die "claude is not installed or not on SPARK_PATH"
-  [[ -d "${CLAUDE_PROJECT_DIR:-}" ]] || die "CLAUDE_PROJECT_DIR is invalid"
   cd "$CLAUDE_PROJECT_DIR"
   local -a args=(remote-control --permission-mode "${CLAUDE_PERMISSION_MODE:-auto}")
   # Only pass --spawn/--capacity when the project asked for something other
   # than the CLI's own defaults, so projects configured before these settings
   # existed keep behaving exactly as before.
-  if [[ -n "${CLAUDE_SPAWN_MODE:-}" && "${CLAUDE_SPAWN_MODE}" != same-dir ]]; then
-    args+=(--spawn "$CLAUDE_SPAWN_MODE")
-  fi
+  case "${CLAUDE_SPAWN_MODE:-same-dir}" in
+    same-dir) ;;
+    worktree) args+=(--spawn worktree) ;;
+    session) die "CLAUDE_SPAWN_MODE=session is not supported by the persistent service; use: sparkctl project tmux $name" ;;
+    *) die "CLAUDE_SPAWN_MODE must be same-dir or worktree" ;;
+  esac
   if [[ -n "${CLAUDE_CAPACITY:-}" ]]; then
     args+=(--capacity "$CLAUDE_CAPACITY")
   fi
   exec claude "${args[@]}"
+}
+
+run_claude_tmux() {
+  local name=${1:-}
+  validate_project_name "$name"
+  load_config
+  load_project_config "$name"
+  have claude || die "claude is not installed or not on SPARK_PATH"
+  cd "$CLAUDE_PROJECT_DIR"
+
+  local status=0
+  claude --permission-mode "${CLAUDE_PERMISSION_MODE:-auto}" --remote-control "$name" || status=$?
+  say "Claude exited with status $status; the tmux session remains open."
+  say "Resume the latest conversation with: claude --continue"
+  say "To choose a conversation instead, run: claude --resume"
+  say "Then enable remote access inside Claude with: /remote-control"
+
+  local interactive_shell=${SHELL:-/bin/bash}
+  [[ -x "$interactive_shell" ]] || die "interactive shell is not executable: $interactive_shell"
+  exec "$interactive_shell" -l
 }
 
 update_repo() {
@@ -397,6 +473,7 @@ main() {
       case "${1:-}" in
         run-opencode) run_opencode ;;
         run-claude) run_claude "${2:-}" ;;
+        run-claude-tmux) run_claude_tmux "${2:-}" ;;
         *) die "unknown internal command: ${1:-}" ;;
       esac
       ;;
@@ -405,4 +482,3 @@ main() {
 }
 
 main "$@"
-

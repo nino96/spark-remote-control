@@ -12,9 +12,8 @@ ExecStart=/usr/bin/env %h/.local/bin/sparkctl internal run-claude %i
 # `claude remote-control` exits on purpose after ~10 minutes offline (see
 # docs/product-validation.md), so Restart=on-failure would leave the daemon
 # dead after any outage longer than that. Restart=always brings it back;
-# restarting in the same project directory resumes the sessions it was
-# serving rather than creating new ones, as long as it happens within the
-# ~4-hour resume window Claude Code keeps for that directory.
+# this restores server availability but does not guarantee that sessions
+# served by the previous process are reattached.
 Restart=always
 RestartSec=10s
 TimeoutStopSec=30s
@@ -30,4 +29,3 @@ RestrictSUIDSGID=true
 
 [Install]
 WantedBy=default.target
-
