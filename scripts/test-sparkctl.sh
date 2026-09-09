@@ -16,6 +16,12 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# sparkctl branches on TMUX, so the suite must not inherit the tmux session a
+# maintainer is likely running `make check` from. Cases needing the in-tmux
+# path set TMUX explicitly; every other case must see it unset.
+unset TMUX TMUX_PANE
+unset SPARK_TEST_TMUX_HAS_SESSION SPARK_TEST_SYSTEMD_ACTIVE SPARK_TEST_CLAUDE_STATUS
+
 fail() {
   printf 'sparkctl test: FAIL: %s\n' "$*" >&2
   exit 1
