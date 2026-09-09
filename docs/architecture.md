@@ -22,6 +22,12 @@ phone / laptop / tablet
 Claude web/mobile -- outbound provider relay -- Claude Remote Control
                                               |
                                               +-- one explicit project
+
+Codex / Copilot web/mobile -- vendor remote control -- local CLI session
+                                                               |
+                                                               +-- not managed
+                                                                   by this
+                                                                   toolkit
 ```
 
 There are two independent trust boundaries:
@@ -47,8 +53,13 @@ local environment remotely; it is not equivalent to an independent cloud job.
 | `sparkctl project tmux NAME` | on demand | outbound relay | One interactive Claude session with explicit resume control |
 | Existing `vllm-server` container | external | currently all interfaces | Local model API; monitor now, migrate later |
 
-Codex and Copilot remain interactive CLIs. Cloud variants are launched from
-their provider/GitHub interfaces and are intentionally not coupled to systemd.
+Codex and Copilot are not in this table: this toolkit manages no unit,
+launcher, or wrapper for either. Both CLIs now ship their own vendor-native
+remote control for a local session (`codex remote-control`, `copilot
+--remote`), separate from their provider cloud agents and different in shape
+from each other: Codex uses one shared machine-wide daemon, while Copilot
+attaches to one live session, closer to the `sparkctl project tmux` pattern.
+Adding toolkit support is tracked in issues #2 (Codex) and #3 (Copilot).
 
 ## Security decisions
 
@@ -58,6 +69,11 @@ their provider/GitHub interfaces and are intentionally not coupled to systemd.
 - Provider login remains interactive. Setup scripts never scrape or copy auth
   tokens.
 - Each Claude service names one checkout rather than inheriting `~/code`.
+  This is a Claude-specific property, not a general one: Codex's
+  `remote-control` daemon is shared machine-wide across all projects rather
+  than scoped per checkout, so equivalent Codex isolation would have to come
+  from Codex's own sandbox/permission profile, not from systemd unit
+  boundaries (tracked in issue #2).
 - Ubuntu's stacked `bwrap`/`unpriv_bwrap` policy allows setup and strips child
   capabilities; the global
   unprivileged-user-namespace restriction stays enabled.

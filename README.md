@@ -12,15 +12,18 @@ It manages:
 - Health checks for the existing Docker-managed vLLM service.
 - User-level systemd units, pinned tool versions, updates, and removal.
 
-Codex and Copilot remain on-demand CLIs. Cloud agents remain provider-managed
-and exchange work through GitHub branches and pull requests.
+Codex and Copilot CLIs now ship native remote control of a local session
+(a shared app-server daemon for Codex, live-session attach for Copilot).
+This toolkit does not manage either yet; see issues #2 and #3. Cloud agents
+remain a separate, provider-managed path that exchanges work through GitHub
+branches and pull requests.
 
 ## What was found on this GX10
 
-The box is Ubuntu 24.04.4 on ARM64. Codex and Claude are installed; OpenCode
-and the standalone GitHub CLI are not. Tailscale and Docker are active. vLLM
-already runs in a container, so this repository monitors it instead of
-starting a competing service.
+The box is Ubuntu 24.04.4 on ARM64. Codex, Claude, GitHub Copilot CLI, the
+standalone GitHub CLI (`gh`), and OpenCode are all installed. Tailscale and
+Docker are active. vLLM already runs in a container, so this repository
+monitors it instead of starting a competing service.
 
 Two existing settings need deliberate treatment:
 
