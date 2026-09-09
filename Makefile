@@ -4,7 +4,8 @@ SHELL := /usr/bin/env bash
 
 .PHONY: help setup doctor check update install-opencode update-opencode \
 	auth-opencode status start stop restart logs tailscale-plan \
-	bwrap-status bwrap-install bwrap-remove bwrap-test
+	bwrap-status bwrap-install bwrap-remove bwrap-test \
+	codex-status codex-start codex-stop codex-pair
 
 help: ## Show available commands
 	@./bin/sparkctl help
@@ -47,6 +48,18 @@ logs: ## Follow OpenCode Web logs
 
 tailscale-plan: ## Show a non-destructive OpenCode Serve command
 	@./bin/sparkctl tailscale plan
+
+codex-status: ## Show the Codex remote-control daemon and unit status
+	@./bin/sparkctl codex status
+
+codex-start: ## Start the Codex remote-control service
+	@./bin/sparkctl codex start
+
+codex-stop: ## Stop the Codex remote-control service
+	@./bin/sparkctl codex stop
+
+codex-pair: ## Run Codex's interactive remote-control pairing
+	@./bin/sparkctl codex pair
 
 bwrap-status: ## Diagnose bubblewrap/AppArmor
 	@./scripts/bwrap-apparmor.sh status

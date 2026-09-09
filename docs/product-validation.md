@@ -26,19 +26,61 @@ them before automating billing-sensitive behavior.
   interactive CLI: architecturally it is one shared machine-wide app-server
   daemon rather than scoped per project or per checkout, unlike Claude Code's
   per-project Remote Control model (see
-  `docs/architecture.md`). It remains `[experimental]`, and this toolkit does
-  not manage it -- no unit, launcher, or wrapper exists. Toolkit support is
-  tracked in issue #2.
+  `docs/architecture.md`). It remains `[experimental]`, and this toolkit now
+  manages its lifecycle through `spark-codex-remote.service`; see
+  `docs/architecture.md` for the unit shape and the trust-boundary
+  consequences of a shared, PID-1-reparented daemon.
 - Do not model a Linux GX10 as equivalent to the documented desktop Remote
   host workflow; that distinction still applies to Codex Cloud regardless of
   the local `remote-control` subcommand described above.
+- Observed directly on this host while building the toolkit integration
+  (still Codex CLI 0.153.4), using only the read-only invocations the live
+  hand-started daemon on this host permitted (`codex ... --help` and `codex
+  app-server daemon version`; `remote-control`/`daemon` lifecycle
+  subcommands were not exercised to avoid disturbing that daemon):
+  - The full subcommand surface is `codex remote-control
+    {start,stop,pair}` (each accepting `--json`) and `codex app-server daemon
+    {bootstrap,start,restart,enable-remote-control,disable-remote-control,stop,version}`.
+  - `codex app-server daemon version` is a safe, read-only JSON liveness
+    probe. Real output on this host:
+    ```json
+    {"status":"running","backend":"pid","managedCodexPath":"/home/niyam-gb10/.codex/packages/standalone/current/codex","managedCodexVersion":"0.153.4","socketPath":"/home/niyam-gb10/.codex/app-server-control/app-server-control.sock","cliVersion":"0.153.4","appServerVersion":"0.153.4"}
+    ```
+    `status` is not documented as an enum; treat any value other than
+    `"running"`, or a non-zero exit, as "not running" rather than assuming
+    the only alternative is some other named state.
+  - The daemon detaches: the real process is `codex app-server
+    --remote-control --listen unix://` running with PPID 1, alongside a
+    separate `codex app-server daemon pid-update-loop` process that Codex
+    runs itself as a supervisor. `--remote-control` is a hidden,
+    undocumented flag on `codex app-server` (it does not appear in `codex
+    app-server --help`); this toolkit deliberately does not depend on it
+    directly and only ever invokes the documented `codex remote-control`/
+    `codex app-server daemon` subcommands.
+  - State lives under `$CODEX_HOME` (default `~/.codex`):
+    `app-server-daemon/app-server.pid` (JSON `{"pid":N,"processStartTime":"..."}`),
+    `app-server-daemon/settings.json` (`{"remoteControlEnabled": true}`), and
+    the `app-server-control/app-server-control.sock` control socket.
+- Not validated by this work, and left open from issue #2: whether the
+  daemon has any restart-on-failure behavior of its own, whether it has a
+  give-up-and-exit timeout analogous to Claude Code's roughly 10-minute
+  offline exit (which is what drives `Restart=always` on the Claude unit),
+  and how remote control interacts with the bubblewrap sandbox and the
+  AppArmor profile this repository installs. `spark-codex-remote.service`'s
+  `Type=oneshot`/`RemainAfterExit=yes` shape and lack of `Restart=` follow
+  from the daemon's detach-and-self-supervise behavior observed above, not
+  from a confirmed answer to the restart-policy question.
 
 Sources: [Codex Cloud](https://learn.chatgpt.com/docs/cloud),
 [developer commands](https://learn.chatgpt.com/docs/developer-commands?surface=cli),
 and [sandboxing](https://learn.chatgpt.com/docs/sandboxing). The
 `remote-control`/`agents`/`--remote` details above are from `codex
 remote-control --help` and `codex --help` on this host, not from the linked
-documentation.
+documentation. The daemon-behavior details (liveness probe output, PPID 1
+detach, `pid-update-loop`, hidden `--remote-control` flag, `$CODEX_HOME`
+layout) are from direct observation of the live, hand-started daemon already
+running on this host, plus `codex app-server daemon version` output -- not
+from the linked documentation.
 
 ## Claude Code
 

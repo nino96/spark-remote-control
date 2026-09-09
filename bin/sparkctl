@@ -27,6 +27,7 @@ Usage:
   sparkctl tool <install|update> opencode
   sparkctl auth opencode
   sparkctl service <enable|disable|start|stop|restart|status|logs> [opencode]
+  sparkctl codex <status|start|stop|enable|disable|restart|logs|pair|adopt>
   sparkctl project add <name> <directory> [--spawn same-dir|worktree] [--capacity N]
   sparkctl project <enable|disable|start|stop|restart|status|logs|remove> <name>
   sparkctl project tmux <name>
@@ -41,6 +42,8 @@ Typical first run:
   sparkctl doctor
   sparkctl bwrap install
   sparkctl service enable opencode
+  sparkctl codex pair
+  sparkctl codex enable
 EOF
 }
 
@@ -117,7 +120,7 @@ doctor() {
   check_command opencode "required for OpenCode service"
   check_command claude "optional remote-control service"
   check_command tmux "required for project tmux"
-  check_command codex optional
+  check_command codex "required for Codex remote-control service"
   check_command docker "existing vLLM runtime"
 
   say "Configuration"
@@ -151,6 +154,9 @@ doctor() {
   else
     say "  container        not found"
   fi
+
+  say "Codex remote control"
+  codex_status_lines
 
   say "Managed services"
   systemctl --user --no-pager --full status spark-opencode.service || true
@@ -186,6 +192,117 @@ service_action() {
     status) systemctl --user --no-pager --full status "$unit" ;;
     logs) exec journalctl --user -u "$unit" -f ;;
     *) die "unknown service action: $action" ;;
+  esac
+}
+
+codex_home() {
+  printf '%s\n' "${CODEX_HOME:-$HOME/.codex}"
+}
+
+# Shells out to `codex app-server daemon version` and parses its stdout
+# rather than reaching into process tables, so this stays testable with a
+# fake `codex` on SPARK_PATH. Echoes one of: running, stopped, unknown.
+codex_daemon_status() {
+  have codex || { printf 'unknown\n'; return; }
+  local output
+  output=$(codex app-server daemon version 2>/dev/null) || { printf 'stopped\n'; return; }
+  local status
+  status=$(printf '%s' "$output" | sed -n 's/.*"status" *: *"\([^"]*\)".*/\1/p')
+  case "$status" in
+    running) printf 'running\n' ;;
+    '') printf 'unknown\n' ;;
+    *) printf 'stopped\n' ;;
+  esac
+}
+
+# Best-effort appServerVersion from the same probe; empty when unavailable.
+codex_daemon_version() {
+  have codex || return 0
+  codex app-server daemon version 2>/dev/null \
+    | sed -n 's/.*"appServerVersion" *: *"\([^"]*\)".*/\1/p'
+}
+
+# The three-line report shared by `sparkctl codex status` and `sparkctl
+# doctor`, so the two can never drift apart.
+codex_status_lines() {
+  local unit=spark-codex-remote.service
+  local daemon
+  daemon=$(codex_daemon_status)
+  if [[ "$daemon" == running ]]; then
+    local version
+    version=$(codex_daemon_version)
+    [[ -z "$version" ]] || daemon="running ($version)"
+  fi
+  printf '  %-16s %s\n' daemon "$daemon"
+  printf '  %-16s %s\n' remote-control "$(codex_remote_control_enabled)"
+  printf '  %-16s %s\n' unit "enabled=$(systemctl --user is-enabled "$unit" 2>/dev/null || echo disabled) active=$(systemctl --user is-active "$unit" 2>/dev/null || echo inactive)"
+}
+
+# Reads $CODEX_HOME/app-server-daemon/settings.json. Echoes one of: enabled,
+# disabled, unknown.
+codex_remote_control_enabled() {
+  local settings_file
+  settings_file="$(codex_home)/app-server-daemon/settings.json"
+  [[ -f "$settings_file" ]] || { printf 'unknown\n'; return; }
+  local value
+  value=$(sed -n 's/.*"remoteControlEnabled" *: *\(true\|false\).*/\1/p' "$settings_file")
+  case "$value" in
+    true) printf 'enabled\n' ;;
+    false) printf 'disabled\n' ;;
+    *) printf 'unknown\n' ;;
+  esac
+}
+
+# Refuses to hand off to systemd when a Codex daemon is already running but
+# was not started by our unit: it is likely serving live sessions started by
+# hand or by a `codex` TUI, and taking it over silently would be surprising.
+codex_guard_running_daemon() {
+  local unit=spark-codex-remote.service
+  if [[ "$(codex_daemon_status)" == running ]] && ! systemctl --user is-active --quiet "$unit"; then
+    die "a Codex daemon is already running outside $unit; run: sparkctl codex adopt"
+  fi
+}
+
+codex_confirm_adopt() {
+  [[ "${SPARK_ASSUME_YES:-}" == 1 ]] && return
+  [[ -t 0 ]] || die "refusing to adopt a running Codex daemon without confirmation; rerun on a TTY or set SPARK_ASSUME_YES=1"
+  local reply
+  read -r -p "Stop the running Codex daemon and restart it under spark-codex-remote.service? [y/N] " reply
+  [[ "$reply" =~ ^[Yy]$ ]] || die "adoption cancelled"
+}
+
+codex_action() {
+  local action=${1:-status}
+  load_config
+  local unit=spark-codex-remote.service
+  case "$action" in
+    status) codex_status_lines ;;
+    start)
+      codex_guard_running_daemon
+      systemctl --user start "$unit"
+      ;;
+    enable)
+      codex_guard_running_daemon
+      systemctl --user enable --now "$unit"
+      ;;
+    stop) systemctl --user stop "$unit" ;;
+    disable) systemctl --user disable --now "$unit" ;;
+    restart)
+      codex_guard_running_daemon
+      systemctl --user restart "$unit"
+      ;;
+    logs) exec journalctl --user -u "$unit" -f ;;
+    pair)
+      have codex || die "codex is not installed or not on SPARK_PATH"
+      exec codex remote-control pair
+      ;;
+    adopt)
+      have codex || die "codex is not installed or not on SPARK_PATH"
+      codex_confirm_adopt
+      codex remote-control stop
+      systemctl --user enable --now "$unit"
+      ;;
+    *) die "unknown codex action: $action" ;;
   esac
 }
 
@@ -412,6 +529,18 @@ run_claude_tmux() {
   exec "$interactive_shell" -l
 }
 
+run_codex_start() {
+  load_config
+  have codex || die "codex is not installed or not on SPARK_PATH"
+  exec codex remote-control start
+}
+
+run_codex_stop() {
+  load_config
+  have codex || die "codex is not installed or not on SPARK_PATH"
+  exec codex remote-control stop
+}
+
 update_repo() {
   have git || die "git is required"
   [[ -z "$(git -C "$REPO_DIR" status --porcelain)" ]] || die "repository has uncommitted changes; commit or stash them before updating"
@@ -430,6 +559,7 @@ remove_managed_link() {
 uninstall_repo() {
   local purge=${1:-}
   systemctl --user disable --now spark-opencode.service >/dev/null 2>&1 || true
+  systemctl --user disable --now spark-codex-remote.service >/dev/null 2>&1 || true
   local project_file name
   if [[ -d "$PROJECT_CONFIG_DIR" ]]; then
     for project_file in "$PROJECT_CONFIG_DIR"/*.env; do
@@ -466,6 +596,7 @@ main() {
     tool) tool_action "$@" ;;
     auth) auth_action "$@" ;;
     service) service_action "$@" ;;
+    codex) codex_action "$@" ;;
     project) project_action "$@" ;;
     tailscale) tailscale_action "$@" ;;
     bwrap) exec "$REPO_DIR/scripts/bwrap-apparmor.sh" "$@" ;;
@@ -474,6 +605,8 @@ main() {
         run-opencode) run_opencode ;;
         run-claude) run_claude "${2:-}" ;;
         run-claude-tmux) run_claude_tmux "${2:-}" ;;
+        run-codex-start) run_codex_start ;;
+        run-codex-stop) run_codex_stop ;;
         *) die "unknown internal command: ${1:-}" ;;
       esac
       ;;

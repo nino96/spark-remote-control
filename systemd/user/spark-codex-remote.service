@@ -1,0 +1,41 @@
+[Unit]
+Description=Spark Remote Control - Codex app-server daemon
+Documentation=https://learn.chatgpt.com/docs/developer-commands?surface=cli
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=600
+StartLimitBurst=8
+
+[Service]
+# Codex's app-server daemon detaches and reparents to PID 1 once started, so
+# it cannot be supervised as Type=simple. RemainAfterExit=yes keeps the unit
+# "active" after the short-lived start command exits, matching the real
+# lifecycle: boot persistence and a documented start/stop entry point, not
+# process supervision (Codex's own pid-update-loop is the daemon's restart
+# story). No Restart= for the same reason -- there is no long-lived process
+# in this unit to restart.
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/env %h/.local/bin/sparkctl internal run-codex-start
+ExecStop=/usr/bin/env %h/.local/bin/sparkctl internal run-codex-stop
+TimeoutStopSec=30s
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+LockPersonality=true
+RestrictSUIDSGID=true
+# The hardening directives above only ever apply to the short-lived
+# `codex remote-control start`/`stop` processes launched by ExecStart/
+# ExecStop: the actual daemon (`codex app-server --remote-control`) detaches
+# to PPID 1 and runs outside this unit's scope entirely, so none of this
+# confines it. Unlike spark-claude-remote@NAME.service, which names one
+# checkout, this unit cannot scope Codex to a project -- that comes from
+# Codex's own sandbox/permission profile (codex-linux-sandbox, bubblewrap,
+# this repo's AppArmor profile) instead.
+
+[Install]
+WantedBy=default.target

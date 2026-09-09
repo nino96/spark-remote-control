@@ -8,15 +8,17 @@ It manages:
 
 - OpenCode Web on loopback for interactive GX10 work.
 - Claude Code Remote Control as an opt-in service per project.
+- Codex Remote Control as an opt-in, machine-wide app-server daemon service.
 - A guarded Ubuntu AppArmor fix for Codex and Copilot bubblewrap sandboxes.
 - Health checks for the existing Docker-managed vLLM service.
 - User-level systemd units, pinned tool versions, updates, and removal.
 
 Codex and Copilot CLIs now ship native remote control of a local session
 (a shared app-server daemon for Codex, live-session attach for Copilot).
-This toolkit does not manage either yet; see issues #2 and #3. Cloud agents
-remain a separate, provider-managed path that exchanges work through GitHub
-branches and pull requests.
+This toolkit now manages Codex's daemon through `spark-codex-remote.service`;
+Copilot remains unmanaged for now, see issue #3. Cloud agents remain a
+separate, provider-managed path that exchanges work through GitHub branches
+and pull requests.
 
 ## What was found on this GX10
 
@@ -185,6 +187,47 @@ tmux does not survive a host reboot, but Claude's saved conversations do. After
 a reboot, create the tmux session again and use `claude --resume` if you need a
 specific previous conversation. To end the tmux session itself, exit its shell
 or run `tmux kill-session -t spark-claude-my-project`.
+
+## Add Codex Remote Control
+
+Codex ships `codex remote-control`, marked `[experimental]` upstream, so this
+surface may change. Unlike Claude, Codex runs one shared app-server daemon
+per `$CODEX_HOME` rather than one server per project, so there is a single
+`spark-codex-remote.service`, not a per-project template:
+
+```bash
+sparkctl codex status
+sparkctl codex enable
+sparkctl codex logs
+```
+
+`sparkctl codex status` prints daemon liveness (from `codex app-server daemon
+version`) alongside the unit's `systemctl --user` state, and never fails just
+because the daemon is stopped. `start`, `enable`, and `restart` all refuse to
+act if a daemon is already running that the unit did not start: an
+unmanaged daemon is probably serving live Codex sessions, and this toolkit
+will not restart or take it over silently. Use `sparkctl codex adopt` in that
+case:
+
+```bash
+sparkctl codex adopt
+```
+
+`adopt` asks for confirmation on a TTY (skip it non-interactively with
+`SPARK_ASSUME_YES=1`), stops the existing hand-started daemon, and starts it
+again under `spark-codex-remote.service` so it gets boot persistence and a
+documented lifecycle going forward.
+
+Pairing stays interactive, the same way Claude and OpenCode authentication
+do:
+
+```bash
+sparkctl codex pair
+```
+
+This execs `codex remote-control pair` directly. The short-lived pairing code
+it prints is never stored, logged, or baked into the unit; enter it into the
+Codex web or mobile client to link that session.
 
 ## Operations
 
